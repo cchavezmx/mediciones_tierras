@@ -1,81 +1,96 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
 import Plot from "react-plotly.js";
-
-function normalizeKey(k) {
-  // Limpia BOM, espacios duplicados y convierte a formato predecible
-  return String(k || "").replace(/^\uFEFF/, "").trim().replace(/\s+/g, "_");
-}
 
 function toNumber(v) {
   if (v === null || v === undefined) return null;
   const raw = String(v).trim();
-  // Si el valor viene con decimal usando coma y sin punto, conviértelo
-  const s = raw.includes(",") && !raw.includes(".") ? raw.replace(/,/g, ".") : raw;
-  const cleaned = s.replace(/\s+/g, "");
-  const n = Number(cleaned);
+  // Limpia separadores y detecta decimal con coma
+  let s = raw.replace(/\s+/g, "");
+  if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) {
+    // miles con coma, decimal con punto -> quita comas
+    s = s.replace(/,/g, "");
+  } else if (s.includes(",") && !s.includes(".")) {
+    // decimal con coma
+    s = s.replace(/,/g, ".");
+  }
+  const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
 
 function parseTime(v) {
   const s = String(v || "").trim();
-  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})$/);
+  // Acepta dd/mm/yyyy HH:MM o dd/mm/yyyy HH:MM:SS
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/);
   if (m) {
     const dd = Number(m[1]);
     const mm = Number(m[2]);
     const yyyy = Number(m[3]);
     const HH = Number(m[4]);
     const MM = Number(m[5]);
-    return new Date(yyyy, mm - 1, dd, HH, MM);
+    const SS = Number(m[6] || 0);
+    return new Date(yyyy, mm - 1, dd, HH, MM, SS);
   }
   const d = new Date(s);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function pickColumn(cols, candidates) {
-  const set = new Set(cols);
-  for (const c of candidates) {
-    if (set.has(c)) return c;
-  }
-  return null;
+const expected = {
+  time: "Time",
+  urms: { L1: "Urms L1 MAX", L2: "Urms L2 MAX", L3: "Urms L3 MAX" },
+  irms: { L1: "Irms L1 MAX", L2: "Irms L2 MAX", L3: "Irms L3 MAX" },
+  ipk: { L1: "Ipk L1 MAX", L2: "Ipk L2 MAX", L3: "Ipk L3 MAX" }, // corriente pico
+  potencia: {
+    L1: "P L1 MAX",
+    L2: "P L2 MAX",
+    L3: "P L3 MAX",
+    ALL: "P All MAX",
+  },
+};
+
+function matchesLine(colName, line) {
+  if (!line || line === "ALL") return true;
+  const ln = String(line || "").toUpperCase();
+  const c = String(colName || "").toUpperCase();
+  return c.includes(` ${ln} `) || c.endsWith(` ${ln}`) || c.startsWith(`${ln} `) || c.includes(`${ln}_`);
 }
 
 export default function App() {
   const [rows, setRows] = useState([]);
-  const [metric, setMetric] = useState("all"); // all | urms | irms | ipk | potencia
-  const [phase, setPhase] = useState("ALL"); // L1 | L2 | L3 | ALL
+  const [metric, setMetric] = useState("all"); // all | urms | irms | ipk | potencia | pall
+  const [phase, setPhase] = useState("ALL"); // L1 | L2 | L3 | ALL (para métricas por fase)
+  const [lineFilter, setLineFilter] = useState("ALL"); // Filtro para "Todas las columnas"
   const plotRef = useRef(null);
 
   const detected = useMemo(() => {
     if (!rows.length) return null;
     const cols = Object.keys(rows[0] || {});
 
-    const timeCol = pickColumn(cols, ["Time", "time", "Fecha", "FECHA", "Datetime", "DateTime"]);
+    const timeCol = expected.time;
 
-    // EXACTOS a tus headers normalizados:
     const urms = {
-      L1: pickColumn(cols, ["Urms_L1_MAX"]),
-      L2: pickColumn(cols, ["Urms_L2_MAX"]),
-      L3: pickColumn(cols, ["Urms_L3_MAX"]),
+      L1: cols.includes(expected.urms.L1) ? expected.urms.L1 : null,
+      L2: cols.includes(expected.urms.L2) ? expected.urms.L2 : null,
+      L3: cols.includes(expected.urms.L3) ? expected.urms.L3 : null,
     };
 
     const irms = {
-      L1: pickColumn(cols, ["Irms_L1_MAX"]),
-      L2: pickColumn(cols, ["Irms_L2_MAX"]),
-      L3: pickColumn(cols, ["Irms_L3_MAX"]),
+      L1: cols.includes(expected.irms.L1) ? expected.irms.L1 : null,
+      L2: cols.includes(expected.irms.L2) ? expected.irms.L2 : null,
+      L3: cols.includes(expected.irms.L3) ? expected.irms.L3 : null,
     };
 
     const ipk = {
-      L1: pickColumn(cols, ["Ipk_L1_MAX"]),
-      L2: pickColumn(cols, ["Ipk_L2_MAX"]),
-      L3: pickColumn(cols, ["Ipk_L3_MAX"]),
+      L1: cols.includes(expected.ipk.L1) ? expected.ipk.L1 : null,
+      L2: cols.includes(expected.ipk.L2) ? expected.ipk.L2 : null,
+      L3: cols.includes(expected.ipk.L3) ? expected.ipk.L3 : null,
     };
 
     const potencia = {
-      L1: pickColumn(cols, ["P_L1_MAX"]),
-      L2: pickColumn(cols, ["P_L2_MAX"]),
-      L3: pickColumn(cols, ["P_L3_MAX"]),
-      ALL: pickColumn(cols, ["P_All_MAX"]),
+      L1: cols.includes(expected.potencia.L1) ? expected.potencia.L1 : null,
+      L2: cols.includes(expected.potencia.L2) ? expected.potencia.L2 : null,
+      L3: cols.includes(expected.potencia.L3) ? expected.potencia.L3 : null,
+      ALL: cols.includes(expected.potencia.ALL) ? expected.potencia.ALL : null,
     };
 
     return { cols, timeCol, urms, irms, ipk, potencia };
@@ -92,11 +107,13 @@ export default function App() {
       const y = rows.map((r) => toNumber(r[yKey]));
       const hasData = y.some((v) => v !== null);
       if (!hasData) return;
-      traces.push({ x, y, type: "scatter", mode: "lines", name });
+      traces.push({ x, y, type: "scatter", mode: "lines", name, connectgaps: true });
     };
 
     if (metric === "all") {
-      const candidates = (detected.cols || []).filter((c) => c !== detected.timeCol);
+      const candidates = (detected.cols || [])
+        .filter((c) => c !== detected.timeCol)
+        .filter((c) => matchesLine(c, lineFilter));
       candidates.forEach((c) => addTrace(c, c));
       return { traces, title: "Todas las columnas", yTitle: "Valor" };
     }
@@ -137,7 +154,12 @@ export default function App() {
       return { traces, title: `Corriente pico (Ipk) - ${phase === "ALL" ? "Todas" : phase}`, yTitle: "A" };
     }
 
-    // potencia
+    if (metric === "pall") {
+      const m = detected.potencia;
+      addTrace("P Total (All)", m.ALL);
+      return { traces, title: "PALL - Potencia total", yTitle: "W" };
+    }
+
     const m = detected.potencia;
     if (phase === "ALL") {
       addTrace("P L1", m.L1);
@@ -145,10 +167,10 @@ export default function App() {
       addTrace("P L3", m.L3);
       addTrace("P Total (All)", m.ALL);
       return { traces, title: `Potencia - Todas + Total`, yTitle: "W" };
-    } else {
-      addTrace(`P ${phase}`, m[phase]);
-      return { traces, title: `Potencia - ${phase}`, yTitle: "W" };
     }
+
+    addTrace(`P ${phase}`, m[phase]);
+    return { traces, title: `Potencia - ${phase}`, yTitle: "W" };
   }, [rows, metric, phase, detected]);
 
   const onUpload = (file) => {
@@ -156,9 +178,10 @@ export default function App() {
       header: true,
       skipEmptyLines: true,
       delimitersToGuess: [",", ";", "\t", "|"],
-      transformHeader: (h) => normalizeKey(h),
+      transformHeader: (h) => String(h || "").replace(/^\uFEFF/, "").trim(),
       transform: (value) => (typeof value === "string" ? value.trim() : value),
       complete: (res) => {
+        console.log("Parsed CSV:", res);
         setRows(res.data || []);
       },
       error: (err) => console.error(err),
@@ -193,133 +216,154 @@ export default function App() {
       return null;
     }
     if (metric === "urms" && !check(detected.urms)) return "No encuentro Urms_L1_MAX / Urms_L2_MAX / Urms_L3_MAX.";
-    if (metric === "irms" && !check(detected.irms)) return "No encuentro Irms_L1_MAX / Irms_L2_MAX / Irms_L3_MAX.";
-    if (metric === "ipk" && !check(detected.ipk)) return "No encuentro Ipk_L1_MAX / Ipk_L2_MAX / Ipk_L3_MAX.";
-    if (metric === "potencia" && !check(detected.potencia)) return "No encuentro P_L1_MAX / P_L2_MAX / P_L3_MAX.";
+    if (metric === "irms" && !check(detected.irms)) return "No encuentro Irms L1/L2/L3 MAX.";
+    if (metric === "ipk" && !check(detected.ipk)) return "No encuentro Ipk L1/L2/L3 MAX.";
+    if ((metric === "potencia" || metric === "pall") && !check(detected.potencia)) return "No encuentro P L1/L2/L3 MAX o P All MAX.";
     return null;
   }, [rows, detected, metric]);
 
-  const tableHeaders = useMemo(() => (detected?.cols || []), [detected]);
-  const tableRows = useMemo(() => rows.slice(0, 50), [rows]); // muestra 50 filas para no matar el navegador
+  // Si se elige PALL, fijamos fase en ALL para evitar confusión
+  useEffect(() => {
+    if (metric === "pall" && phase !== "ALL") {
+      setPhase("ALL");
+    }
+  }, [metric, phase]);
 
   return (
-    <div style={{ padding: 24, maxWidth: 1300, margin: "0 auto", fontFamily: "system-ui" }}>
-      <h1 style={{ margin: 0 }}>Mediciones desde CSV</h1>
-      <p style={{ opacity: 0.75 }}>
-        Sube un CSV y genera gráficas de Urms/Irms/Ipk/Potencia por fase. Eje X = fecha/hora (Time).
-      </p>
-
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", margin: "16px 0" }}>
-        <input
-          type="file"
-          accept=".csv"
-          onChange={(e) => e.target.files?.[0] && onUpload(e.target.files[0])}
-        />
-
-        <select value={metric} onChange={(e) => setMetric(e.target.value)}>
-          <option value="all">Todas las columnas (auto)</option>
-          <option value="urms">Voltaje (Urms)</option>
-          <option value="irms">Corriente (Irms)</option>
-          <option value="ipk">Corriente pico (Ipk)</option>
-          <option value="potencia">Potencia (P)</option>
-        </select>
-
-        {metric !== "all" && (
-          <select value={phase} onChange={(e) => setPhase(e.target.value)}>
-            <option value="ALL">Todas</option>
-            <option value="L1">L1</option>
-            <option value="L2">L2</option>
-            <option value="L3">L3</option>
-          </select>
-        )}
-
-        <button onClick={exportPNG} disabled={!rows.length || !!missing}>
-          Exportar PNG
-        </button>
-      </div>
-
-      {!rows.length ? (
-        <div style={{ padding: 20, border: "1px dashed #aaa", borderRadius: 12 }}>
-          Sube un CSV para ver las gráficas.
-        </div>
-      ) : missing ? (
-        <div style={{ padding: 20, border: "1px solid #f2c", borderRadius: 12 }}>
-          {missing}
-          <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
-            Columnas detectadas: <code>{detected?.cols?.join(", ")}</code>
+    <>
+      <section className="hero is-gradient is-small">
+        <div className="hero-body">
+          <div className="container">
+            <p className="subtitle has-text-white mb-2">Panel de mediciones</p>
+            <h1 className="title has-text-white mb-3">CSV → Gráficas por fase</h1>
+            <p className="has-text-white-bis">
+              Sube tu CSV con columnas *_MAX en este orden fijo: Time, Urms L1/2/3, Irms L1/2/3, Ipk L1/2/3, P L1/2/3,
+              P All. Visualiza por línea (L1, L2, L3) o todas.
+            </p>
           </div>
         </div>
-      ) : (
-        <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12, width: "fit-content" }}>
-          <Plot
-            ref={plotRef}
-            data={chart.traces}
-            layout={{
-              title: chart.title,
-              xaxis: { title: "Fecha/Hora" },
-              yaxis: { title: chart.yTitle },
-              legend: { orientation: "h" },
-              margin: { l: 60, r: 30, t: 60, b: 60 },
-            }}
-            config={{ responsive: true }}
-            style={{ width: "100%", height: 520 }}
-          />
-        </div>
-      )}
+      </section>
 
-      {/* TABLA con TODAS las columnas */}
-      {/* {rows.length > 0 && ( */}
-      {/*   <div style={{ marginTop: 18 }}> */}
-      {/*     <h3 style={{ marginBottom: 8 }}>Datos (primeras 50 filas, todas las columnas)</h3> */}
-      {/*     <div style={{ overflowX: "auto", border: "1px solid #eee", borderRadius: 12 }}> */}
-      {/*       <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 1100 }}> */}
-      {/*         <thead> */}
-      {/*           <tr> */}
-      {/*             {tableHeaders.map((h) => ( */}
-      {/*               <th */}
-      {/*                 key={h} */}
-      {/*                 style={{ */}
-      {/*                   position: "sticky", */}
-      {/*                   top: 0, */}
-      {/*                   background: "#fff", */}
-      {/*                   borderBottom: "1px solid #eee", */}
-      {/*                   padding: "8px 10px", */}
-      {/*                   textAlign: "left", */}
-      {/*                   whiteSpace: "nowrap", */}
-      {/*                   fontSize: 12, */}
-      {/*                 }} */}
-      {/*               > */}
-      {/*                 {h} */}
-      {/*               </th> */}
-      {/*             ))} */}
-      {/*           </tr> */}
-      {/*         </thead> */}
-      {/*         <tbody> */}
-      {/*           {tableRows.map((r, idx) => ( */}
-      {/*             <tr key={idx}> */}
-      {/*               {tableHeaders.map((h) => ( */}
-      {/*                 <td */}
-      {/*                   key={h} */}
-      {/*                   style={{ */}
-      {/*                     borderBottom: "1px solid #f5f5f5", */}
-      {/*                     padding: "6px 10px", */}
-      {/*                     whiteSpace: "nowrap", */}
-      {/*                     fontSize: 12, */}
-      {/*                   }} */}
-      {/*                 > */}
-      {/*                   {String(r[h] ?? "")} */}
-      {/*                 </td> */}
-      {/*               ))} */}
-      {/*             </tr> */}
-      {/*           ))} */}
-      {/*         </tbody> */}
-      {/*       </table> */}
-      {/*     </div> */}
-      {/*     <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}> */}
-      {/*       Tip: si quieres ver más de 50 filas, te lo ajusto (pero puede ponerse pesado si el CSV es grande). */}
-      {/*     </div> */}
-      {/*   </div> */}
-      {/* )} */}
-    </div>
+      <section className="section">
+        <div className="container">
+          <div className="columns is-variable is-5">
+            <div className="column is-4-desktop is-12-tablet">
+              <div className="card">
+                <div className="card-content">
+                  <p className="title is-5 mb-3">Configuración</p>
+                  <div className="field">
+                    <label className="label">Archivo CSV</label>
+                    <div className="control">
+                      <input
+                        className="input"
+                        type="file"
+                        accept=".csv"
+                        onChange={(e) => e.target.files?.[0] && onUpload(e.target.files[0])}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="field is-grouped is-grouped-multiline">
+                    <div className="control">
+                      <div className="select is-fullwidth">
+                        <select value={metric} onChange={(e) => setMetric(e.target.value)}>
+                          <option value="all">Todas las columnas</option>
+                          <option value="urms">Voltaje (Urms)</option>
+                          {/* LRMS no existe en el CSV fijo, usamos Irms */}
+                          <option value="irms">Corriente (Irms)</option>
+                          <option value="ipk">Corriente pico (Ipk)</option>
+                          <option value="potencia">Potencia (P)</option>
+                          <option value="pall">P Total (PALL)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {metric === "all" && (
+                      <div className="control">
+                        <div className="select is-fullwidth">
+                          <select value={lineFilter} onChange={(e) => setLineFilter(e.target.value)}>
+                            <option value="ALL">Todas las líneas</option>
+                            <option value="L1">Solo L1</option>
+                            <option value="L2">Solo L2</option>
+                            <option value="L3">Solo L3</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+
+                    {metric !== "all" && metric !== "pall" && (
+                      <div className="control">
+                        <div className="select is-fullwidth">
+                          <select value={phase} onChange={(e) => setPhase(e.target.value)}>
+                            <option value="ALL">Todas</option>
+                            <option value="L1">L1</option>
+                            <option value="L2">L2</option>
+                            <option value="L3">L3</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="buttons mt-2">
+                    <button className="button is-primary" onClick={exportPNG} disabled={!rows.length || !!missing}>
+                      Exportar PNG
+                    </button>
+                  </div>
+
+                  {rows.length > 0 && (
+                    <p className="is-size-7 has-text-grey mt-2">
+                      Columnas detectadas: <code>{detected?.cols?.join(", ")}</code>
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="column is-8-desktop is-12-tablet">
+              {!rows.length ? (
+                <div className="notification is-light">Sube un CSV para ver las gráficas.</div>
+              ) : missing ? (
+                <div className="notification is-danger">
+                  {missing}
+                  <div className="is-size-7 mt-1">
+                    Columnas detectadas: <code>{detected?.cols?.join(", ")}</code>
+                  </div>
+                </div>
+              ) : (
+                <div className="card">
+                  <div className="card-content">
+                    <Plot
+                      ref={plotRef}
+                      data={chart.traces}
+                      layout={{
+                        title: chart.title,
+                        xaxis: {
+                          title: "Fecha/Hora",
+                          rangeslider: { visible: true },
+                          rangeselector: {
+                            buttons: [
+                              { count: 1, label: "1d", step: "day", stepmode: "backward" },
+                              { count: 3, label: "3d", step: "day", stepmode: "backward" },
+                              { count: 7, label: "7d", step: "day", stepmode: "backward" },
+                              { step: "all", label: "Todo" },
+                            ],
+                          },
+                        },
+                        yaxis: { title: chart.yTitle },
+                        legend: { orientation: "h" },
+                        margin: { l: 60, r: 30, t: 60, b: 60 },
+                      }}
+                      config={{ responsive: true }}
+                      style={{ width: "100%", height: 520 }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+    </>
   );
 }
